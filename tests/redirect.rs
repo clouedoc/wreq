@@ -4,6 +4,7 @@ use http_body_util::BodyExt;
 use support::server;
 use wreq::{
     Body, Client,
+    header::{HeaderName, HeaderValue},
     redirect::{History, Policy},
 };
 
@@ -662,8 +663,14 @@ async fn test_redirect_custom_headers() {
     let client = Client::builder()
         .redirect(Policy::custom(|attempt| {
             attempt
-                .header("x-custom-redirect", "hello")
-                .header("sec-fetch-site", "same-origin")
+                .header(
+                    HeaderName::from_static("x-custom-redirect"),
+                    HeaderValue::from_static("hello"),
+                )
+                .header(
+                    HeaderName::from_static("sec-fetch-site"),
+                    HeaderValue::from_static("same-origin"),
+                )
                 .follow()
         }))
         .build()
@@ -713,7 +720,10 @@ async fn test_redirect_custom_headers_override_sensitive_removal() {
     Client::builder()
         .redirect(Policy::custom(|attempt| {
             attempt
-                .header("authorization", "Bearer custom-token")
+                .header(
+                    HeaderName::from_static("authorization"),
+                    HeaderValue::from_static("Bearer custom-token"),
+                )
                 .follow()
         }))
         .build()
@@ -754,7 +764,12 @@ async fn test_redirect_custom_headers_with_pending() {
     let client = Client::builder()
         .redirect(Policy::custom(|attempt| {
             attempt.pending(|attempt| async move {
-                attempt.header("x-async-header", "async-value").follow()
+                attempt
+                    .header(
+                        HeaderName::from_static("x-async-header"),
+                        HeaderValue::from_static("async-value"),
+                    )
+                    .follow()
             })
         }))
         .build()

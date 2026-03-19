@@ -253,6 +253,7 @@ impl<const PENDING: bool> Attempt<'_, PENDING> {
     ///
     /// ```rust
     /// # use wreq::redirect;
+    /// use wreq::header::{HeaderName, HeaderValue};
     /// #
     /// let policy = redirect::Policy::custom(|attempt| {
     ///     let last = attempt.previous.last().unwrap();
@@ -265,22 +266,17 @@ impl<const PENDING: bool> Attempt<'_, PENDING> {
     ///     };
     ///
     ///     attempt
-    ///         .header("sec-fetch-site", site)
+    ///         .header(
+    ///             HeaderName::from_static("sec-fetch-site"),
+    ///             HeaderValue::from_static(site),
+    ///         )
     ///         .follow()
     /// });
     /// ```
-    pub fn header<K, V>(mut self, name: K, value: V) -> Self
-    where
-        K: TryInto<HeaderName>,
-        K::Error: Into<http::Error>,
-        V: TryInto<HeaderValue>,
-        V::Error: Into<http::Error>,
-    {
-        if let (Ok(name), Ok(value)) = (name.try_into(), value.try_into()) {
-            self.extra_headers
-                .get_or_insert_with(HeaderMap::new)
-                .insert(name, value);
-        }
+    pub fn header(mut self, name: HeaderName, value: HeaderValue) -> Self {
+        self.extra_headers
+            .get_or_insert_with(HeaderMap::new)
+            .insert(name, value);
         self
     }
 
@@ -627,8 +623,14 @@ mod tests {
     fn test_redirect_policy_custom_with_headers() {
         let policy = Policy::custom(|attempt| {
             attempt
-                .header("x-custom", "value")
-                .header("sec-fetch-site", "cross-site")
+                .header(
+                    HeaderName::from_static("x-custom"),
+                    HeaderValue::from_static("value"),
+                )
+                .header(
+                    HeaderName::from_static("sec-fetch-site"),
+                    HeaderValue::from_static("cross-site"),
+                )
                 .follow()
         });
 

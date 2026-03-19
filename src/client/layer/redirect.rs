@@ -14,7 +14,8 @@ use http_body::Body;
 use tower::{Layer, Service};
 
 use self::future::ResponseFuture;
-pub use self::policy::{Action, Attempt, Policy};
+pub use self::policy::{Action, Attempt, Policy, ProxyOverride};
+pub(crate) use self::policy::HeadersOverride;
 use crate::error::BoxError;
 
 enum BodyRepr<B> {

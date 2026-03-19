@@ -2,9 +2,9 @@
 
 use std::{fmt, pin::Pin};
 
-use http::{HeaderMap, Request, Response, StatusCode, Uri};
+use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode, Uri};
 
-use crate::error::BoxError;
+use crate::{Proxy, error::BoxError};
 
 /// Trait for the policy on handling redirection responses.
 pub trait Policy<B, E> {
@@ -38,13 +38,34 @@ pub struct Attempt<'a> {
     pub(crate) previous: &'a Uri,
 }
 
+/// Proxy override for a redirect request.
+#[derive(Debug)]
+pub enum ProxyOverride {
+    /// Use this proxy for the redirect.
+    Use(Box<Proxy>),
+    /// Go direct (clear any proxy).
+    Direct,
+}
+
+/// Header overrides for a redirect request.
+///
+/// Each entry is `(name, value)`:
+/// - `Some(value)` — set/override the header
+/// - `None` — remove the header
+///
+/// Uses a `Vec` rather than a `HashMap` because redirect policies typically
+/// override only a handful of headers, making linear scan cheaper than hashing.
+pub(crate) type HeadersOverride = Vec<(HeaderName, Option<HeaderValue>)>;
+
 /// A value returned by [`Policy::redirect`] which indicates the action
 /// [`FollowRedirect`][super::FollowRedirect] should take for a redirection response.
 pub enum Action {
     /// Follow the redirection, optionally with extra options to apply to the redirect request.
     Follow {
-        /// Extra headers to apply to the redirect request.
-        extra_headers: Option<HeaderMap>,
+        /// Header overrides for the redirect request.
+        headers_override: Option<HeadersOverride>,
+        /// Proxy override for the redirect request.
+        proxy_override: Option<ProxyOverride>,
     },
     /// Do not follow the redirection, and return the redirection response as-is.
     Stop,
@@ -57,9 +78,13 @@ pub enum Action {
 impl fmt::Debug for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Action::Follow { extra_headers } => f
+            Action::Follow {
+                headers_override,
+                proxy_override,
+            } => f
                 .debug_struct("Follow")
-                .field("extra_headers", extra_headers)
+                .field("headers_override", headers_override)
+                .field("proxy_override", proxy_override)
                 .finish(),
             Action::Stop => f.debug_tuple("Stop").finish(),
             Action::Pending(_) => f.debug_tuple("Pending").finish(),

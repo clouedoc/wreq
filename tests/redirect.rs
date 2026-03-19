@@ -665,11 +665,11 @@ async fn test_redirect_custom_headers() {
             attempt
                 .header(
                     HeaderName::from_static("x-custom-redirect"),
-                    HeaderValue::from_static("hello"),
+                    Some(HeaderValue::from_static("hello")),
                 )
                 .header(
                     HeaderName::from_static("sec-fetch-site"),
-                    HeaderValue::from_static("same-origin"),
+                    Some(HeaderValue::from_static("same-origin")),
                 )
                 .follow()
         }))
@@ -722,7 +722,7 @@ async fn test_redirect_custom_headers_override_sensitive_removal() {
             attempt
                 .header(
                     HeaderName::from_static("authorization"),
-                    HeaderValue::from_static("Bearer custom-token"),
+                    Some(HeaderValue::from_static("Bearer custom-token")),
                 )
                 .follow()
         }))
@@ -767,7 +767,7 @@ async fn test_redirect_custom_headers_with_pending() {
                 attempt
                     .header(
                         HeaderName::from_static("x-async-header"),
-                        HeaderValue::from_static("async-value"),
+                        Some(HeaderValue::from_static("async-value")),
                     )
                     .follow()
             })

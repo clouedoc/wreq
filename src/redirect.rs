@@ -11,6 +11,7 @@ use futures_util::FutureExt;
 use http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri};
 
 use crate::{
+    Proxy,
     client::{Body, layer::redirect},
     config::RequestConfig,
     error::{BoxError, Error},
@@ -49,8 +50,11 @@ pub struct Attempt<'a, const PENDING: bool = true> {
     /// The list of previous URIs that have already been requested in this chain.
     pub previous: Cow<'a, [Uri]>,
 
-    /// Extra headers to apply to the redirect request.
-    extra_headers: Option<HeaderMap>,
+    /// Header overrides for the redirect request.
+    headers_override: Option<redirect::HeadersOverride>,
+
+    /// Proxy override for the redirect request.
+    proxy_override: Option<redirect::ProxyOverride>,
 }
 
 /// An action to perform when a redirect status code is found.
@@ -223,7 +227,8 @@ impl Policy {
             headers: Cow::Borrowed(headers),
             uri: Cow::Borrowed(next),
             previous: Cow::Borrowed(previous),
-            extra_headers: None,
+            headers_override: None,
+            proxy_override: None,
         })
         .inner
     }
@@ -242,18 +247,20 @@ impl_request_config_value!(Policy);
 // ===== impl Attempt =====
 
 impl<const PENDING: bool> Attempt<'_, PENDING> {
-    /// Adds a header to be set on the redirect request.
+    /// Overrides or removes a header on the redirect request.
     ///
-    /// This method can be chained before calling [`follow()`](Self::follow) to customize
-    /// the headers sent with the redirect request. Headers set here are applied *after*
-    /// the default header processing (e.g., sensitive header removal on cross-origin
-    /// redirects), so they take precedence.
+    /// - `Some(value)` — set/override the header
+    /// - `None` — remove the header from the request
+    ///
+    /// Headers set here are applied *after* the default header processing
+    /// (e.g., sensitive header removal on cross-origin redirects), so they
+    /// take precedence.
     ///
     /// # Example
     ///
     /// ```rust
     /// # use wreq::redirect;
-    /// use wreq::header::{HeaderName, HeaderValue};
+    /// use wreq::header::{HeaderName, HeaderValue, USER_AGENT};
     /// #
     /// let policy = redirect::Policy::custom(|attempt| {
     ///     let last = attempt.previous.last().unwrap();
@@ -268,15 +275,49 @@ impl<const PENDING: bool> Attempt<'_, PENDING> {
     ///     attempt
     ///         .header(
     ///             HeaderName::from_static("sec-fetch-site"),
-    ///             HeaderValue::from_static(site),
+    ///             Some(HeaderValue::from_static(site)),
     ///         )
+    ///         // Strip User-Agent on redirects
+    ///         .header(USER_AGENT, None)
     ///         .follow()
     /// });
     /// ```
-    pub fn header(mut self, name: HeaderName, value: HeaderValue) -> Self {
-        self.extra_headers
-            .get_or_insert_with(HeaderMap::new)
-            .insert(name, value);
+    pub fn header(mut self, name: HeaderName, value: Option<HeaderValue>) -> Self {
+        self.headers_override
+            .get_or_insert_with(Default::default)
+            .push((name, value));
+        self
+    }
+
+    /// Overrides the proxy for this redirect request.
+    ///
+    /// - `Some(proxy)` — use this proxy for the redirect
+    /// - `None` — go direct (clear any proxy)
+    ///
+    /// If not called, the redirect inherits the proxy from the original request.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use wreq::redirect;
+    /// #
+    /// // Use a specific proxy for redirects
+    /// let policy = redirect::Policy::custom(|attempt| {
+    ///     attempt
+    ///         .proxy(Some(wreq::Proxy::all("socks5://127.0.0.1:1080").unwrap()))
+    ///         .follow()
+    /// });
+    ///
+    /// // Go direct on redirects
+    /// let policy = redirect::Policy::custom(|attempt| {
+    ///     attempt.proxy(None).follow()
+    /// });
+    /// ```
+    pub fn proxy(mut self, proxy: Option<Proxy>) -> Self {
+        self.proxy_override = Some(match proxy {
+            Some(p) => redirect::ProxyOverride::Use(Box::new(p)),
+            None => redirect::ProxyOverride::Direct,
+        });
         self
     }
 
@@ -285,7 +326,8 @@ impl<const PENDING: bool> Attempt<'_, PENDING> {
     pub fn follow(self) -> Action {
         Action {
             inner: redirect::Action::Follow {
-                extra_headers: self.extra_headers,
+                headers_override: self.headers_override,
+                proxy_override: self.proxy_override,
             },
         }
     }
@@ -343,7 +385,8 @@ impl Attempt<'_, true> {
             headers: Cow::Owned(self.headers.into_owned()),
             uri: Cow::Owned(self.uri.into_owned()),
             previous: Cow::Owned(self.previous.into_owned()),
-            extra_headers: self.extra_headers,
+            headers_override: self.headers_override,
+            proxy_override: self.proxy_override,
         };
         let pending = Box::pin(func(attempt).map(|action| action.inner));
         Action {
@@ -625,11 +668,11 @@ mod tests {
             attempt
                 .header(
                     HeaderName::from_static("x-custom"),
-                    HeaderValue::from_static("value"),
+                    Some(HeaderValue::from_static("value")),
                 )
                 .header(
                     HeaderName::from_static("sec-fetch-site"),
-                    HeaderValue::from_static("cross-site"),
+                    Some(HeaderValue::from_static("cross-site")),
                 )
                 .follow()
         });
@@ -637,16 +680,17 @@ mod tests {
         let next = Uri::try_from("http://bar/baz").unwrap();
         match policy.check(StatusCode::FOUND, &HeaderMap::new(), &next, &[]) {
             redirect::Action::Follow {
-                extra_headers: Some(headers),
+                headers_override: Some(headers),
+                ..
             } => {
-                assert_eq!(
-                    headers.get("x-custom").unwrap(),
-                    &HeaderValue::from_static("value")
-                );
-                assert_eq!(
-                    headers.get("sec-fetch-site").unwrap(),
-                    &HeaderValue::from_static("cross-site")
-                );
+                assert!(headers.contains(&(
+                    HeaderName::from_static("x-custom"),
+                    Some(HeaderValue::from_static("value")),
+                )));
+                assert!(headers.contains(&(
+                    HeaderName::from_static("sec-fetch-site"),
+                    Some(HeaderValue::from_static("cross-site")),
+                )));
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -654,12 +698,57 @@ mod tests {
 
     #[test]
     fn test_redirect_policy_follow_without_headers() {
-        // Ensure follow() without header() produces Action::Follow { extra_headers: None }
+        // Ensure follow() without header() produces Action::Follow { headers_override: None }
         let policy = Policy::custom(|attempt| attempt.follow());
 
         let next = Uri::try_from("http://bar/baz").unwrap();
         match policy.check(StatusCode::FOUND, &HeaderMap::new(), &next, &[]) {
             redirect::Action::Follow { .. } => (),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_redirect_policy_custom_with_proxy() {
+        let policy = Policy::custom(|attempt| {
+            attempt
+                .proxy(Some(crate::Proxy::all("socks5://127.0.0.1:1080").unwrap()))
+                .follow()
+        });
+
+        let next = Uri::try_from("http://bar/baz").unwrap();
+        match policy.check(StatusCode::FOUND, &HeaderMap::new(), &next, &[]) {
+            redirect::Action::Follow {
+                proxy_override: Some(redirect::ProxyOverride::Use(_)),
+                ..
+            } => (),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_redirect_policy_custom_no_proxy() {
+        let policy = Policy::custom(|attempt| attempt.proxy(None).follow());
+
+        let next = Uri::try_from("http://bar/baz").unwrap();
+        match policy.check(StatusCode::FOUND, &HeaderMap::new(), &next, &[]) {
+            redirect::Action::Follow {
+                proxy_override: Some(redirect::ProxyOverride::Direct),
+                ..
+            } => (),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_redirect_policy_follow_default_no_proxy_override() {
+        let policy = Policy::custom(|attempt| attempt.follow());
+
+        let next = Uri::try_from("http://bar/baz").unwrap();
+        match policy.check(StatusCode::FOUND, &HeaderMap::new(), &next, &[]) {
+            redirect::Action::Follow {
+                proxy_override: None, ..
+            } => (),
             other => panic!("unexpected {other:?}"),
         }
     }

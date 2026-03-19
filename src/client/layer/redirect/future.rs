@@ -16,8 +16,15 @@ use pin_project_lite::pin_project;
 use tower::{Service, util::Oneshot};
 use url::Url;
 
-use super::{Action, Attempt, BodyRepr, Policy};
-use crate::{Error, error::BoxError, ext::RequestUri, into_uri::IntoUriSealed};
+use super::{Action, Attempt, BodyRepr, Policy, ProxyOverride};
+use crate::{
+    Error,
+    client::layer::config::RequestOptions,
+    config::RequestConfig,
+    error::BoxError,
+    ext::RequestUri,
+    into_uri::IntoUriSealed,
+};
 
 /// Pending future state for handling redirects.
 pub struct Pending<ReqBody, Response> {
@@ -242,7 +249,10 @@ where
     ReqBody: Body + Default,
 {
     match redirect.action {
-        Action::Follow { extra_headers } => {
+        Action::Follow {
+            headers_override,
+            proxy_override,
+        } => {
             redirect.parts.uri = redirect.location;
             redirect
                 .body_repr
@@ -251,11 +261,33 @@ where
             let mut req = Request::from_parts(redirect.parts.clone(), redirect.body);
             redirect.policy.on_request(&mut req);
 
-            // Apply user-specified headers after on_request, so they take precedence
-            if let Some(headers) = extra_headers {
-                for (name, value) in headers {
-                    if let Some(name) = name {
-                        req.headers_mut().insert(name, value);
+            // Apply header overrides after on_request, so they take precedence
+            if let Some(overrides) = headers_override {
+                for (name, value) in overrides {
+                    match value {
+                        Some(v) => {
+                            req.headers_mut().insert(name, v);
+                        }
+                        None => {
+                            req.headers_mut().remove(&name);
+                        }
+                    }
+                }
+            }
+
+            // Apply proxy override via request extensions
+            if let Some(proxy_override) = proxy_override {
+                let opts = RequestConfig::<RequestOptions>::get_mut(req.extensions_mut());
+                match proxy_override {
+                    ProxyOverride::Use(proxy) => {
+                        opts.get_or_insert_default()
+                            .proxy_matcher_mut()
+                            .replace((*proxy).into_matcher());
+                    }
+                    ProxyOverride::Direct => {
+                        if let Some(opts) = opts {
+                            opts.proxy_matcher_mut().take();
+                        }
                     }
                 }
             }

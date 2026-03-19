@@ -627,3 +627,140 @@ async fn test_redirect_location_is_encoded() {
     assert_eq!(res.uri(), dst.as_str());
     assert_eq!(res.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn test_redirect_custom_headers() {
+    let server = server::http(move |req| async move {
+        if req.uri() == "/start" {
+            http::Response::builder()
+                .status(302)
+                .header("location", "/dst")
+                .body(Body::default())
+                .unwrap()
+        } else {
+            assert_eq!(req.uri(), "/dst");
+            assert_eq!(
+                req.headers().get("x-custom-redirect").map(|v| v.to_str().unwrap()),
+                Some("hello")
+            );
+            assert_eq!(
+                req.headers()
+                    .get("sec-fetch-site")
+                    .map(|v| v.to_str().unwrap()),
+                Some("same-origin")
+            );
+            http::Response::builder()
+                .status(200)
+                .body(Body::default())
+                .unwrap()
+        }
+    });
+
+    let url = format!("http://{}/start", server.addr());
+    let dst = format!("http://{}/dst", server.addr());
+
+    let client = Client::builder()
+        .redirect(Policy::custom(|attempt| {
+            attempt
+                .header("x-custom-redirect", "hello")
+                .header("sec-fetch-site", "same-origin")
+                .follow()
+        }))
+        .build()
+        .unwrap();
+
+    let res = client.get(&url).send().await.unwrap();
+    assert_eq!(res.uri(), dst.as_str());
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_redirect_custom_headers_override_sensitive_removal() {
+    use tokio::sync::watch;
+
+    // Test that custom headers set via attempt.header() take precedence
+    // over the automatic sensitive header removal on cross-origin redirects.
+    let (tx, rx) = watch::channel::<Option<std::net::SocketAddr>>(None);
+
+    let end_server = server::http(move |req| {
+        let mut rx = rx.clone();
+        async move {
+            rx.changed().await.unwrap();
+            // Authorization would normally be stripped on cross-host redirect,
+            // but the custom policy re-adds it.
+            assert_eq!(
+                req.headers()
+                    .get("authorization")
+                    .map(|v| v.to_str().unwrap()),
+                Some("Bearer custom-token")
+            );
+            http::Response::default()
+        }
+    });
+
+    let end_addr = end_server.addr();
+
+    let mid_server = server::http(move |_req| async move {
+        http::Response::builder()
+            .status(302)
+            .header("location", format!("http://{end_addr}/end"))
+            .body(Body::default())
+            .unwrap()
+    });
+
+    tx.send(Some(mid_server.addr())).unwrap();
+
+    Client::builder()
+        .redirect(Policy::custom(|attempt| {
+            attempt
+                .header("authorization", "Bearer custom-token")
+                .follow()
+        }))
+        .build()
+        .unwrap()
+        .get(format!("http://{}/start", mid_server.addr()))
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_redirect_custom_headers_with_pending() {
+    let server = server::http(move |req| async move {
+        if req.uri() == "/start" {
+            http::Response::builder()
+                .status(302)
+                .header("location", "/dst")
+                .body(Body::default())
+                .unwrap()
+        } else {
+            assert_eq!(req.uri(), "/dst");
+            assert_eq!(
+                req.headers()
+                    .get("x-async-header")
+                    .map(|v| v.to_str().unwrap()),
+                Some("async-value")
+            );
+            http::Response::builder()
+                .status(200)
+                .body(Body::default())
+                .unwrap()
+        }
+    });
+
+    let url = format!("http://{}/start", server.addr());
+    let dst = format!("http://{}/dst", server.addr());
+
+    let client = Client::builder()
+        .redirect(Policy::custom(|attempt| {
+            attempt.pending(|attempt| async move {
+                attempt.header("x-async-header", "async-value").follow()
+            })
+        }))
+        .build()
+        .unwrap();
+
+    let res = client.get(&url).send().await.unwrap();
+    assert_eq!(res.uri(), dst.as_str());
+    assert_eq!(res.status(), StatusCode::OK);
+}

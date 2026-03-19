@@ -41,8 +41,11 @@ pub struct Attempt<'a> {
 /// A value returned by [`Policy::redirect`] which indicates the action
 /// [`FollowRedirect`][super::FollowRedirect] should take for a redirection response.
 pub enum Action {
-    /// Follow the redirection.
-    Follow,
+    /// Follow the redirection, optionally with extra options to apply to the redirect request.
+    Follow {
+        /// Extra headers to apply to the redirect request.
+        extra_headers: Option<HeaderMap>,
+    },
     /// Do not follow the redirection, and return the redirection response as-is.
     Stop,
     /// Pending async decision. The async task will be awaited to determine the final action.
@@ -54,7 +57,7 @@ pub enum Action {
 impl fmt::Debug for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Action::Follow => f.debug_tuple("Follow").finish(),
+            Action::Follow { .. } => f.debug_tuple("Follow").finish(),
             Action::Stop => f.debug_tuple("Stop").finish(),
             Action::Pending(_) => f.debug_tuple("Pending").finish(),
             Action::Error(_) => f.debug_tuple("Error").finish(),

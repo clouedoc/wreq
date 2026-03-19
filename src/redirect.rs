@@ -48,6 +48,9 @@ pub struct Attempt<'a, const PENDING: bool = true> {
 
     /// The list of previous URIs that have already been requested in this chain.
     pub previous: Cow<'a, [Uri]>,
+
+    /// Extra headers to apply to the redirect request.
+    extra_headers: Option<HeaderMap>,
 }
 
 /// An action to perform when a redirect status code is found.
@@ -220,6 +223,7 @@ impl Policy {
             headers: Cow::Borrowed(headers),
             uri: Cow::Borrowed(next),
             previous: Cow::Borrowed(previous),
+            extra_headers: None,
         })
         .inner
     }
@@ -238,11 +242,55 @@ impl_request_config_value!(Policy);
 // ===== impl Attempt =====
 
 impl<const PENDING: bool> Attempt<'_, PENDING> {
+    /// Adds a header to be set on the redirect request.
+    ///
+    /// This method can be chained before calling [`follow()`](Self::follow) to customize
+    /// the headers sent with the redirect request. Headers set here are applied *after*
+    /// the default header processing (e.g., sensitive header removal on cross-origin
+    /// redirects), so they take precedence.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use wreq::redirect;
+    /// #
+    /// let policy = redirect::Policy::custom(|attempt| {
+    ///     let last = attempt.previous.last().unwrap();
+    ///     let next = &*attempt.uri;
+    ///
+    ///     let site = if last.host() == next.host() {
+    ///         "same-origin"
+    ///     } else {
+    ///         "cross-site"
+    ///     };
+    ///
+    ///     attempt
+    ///         .header("sec-fetch-site", site)
+    ///         .follow()
+    /// });
+    /// ```
+    pub fn header<K, V>(mut self, name: K, value: V) -> Self
+    where
+        K: TryInto<HeaderName>,
+        K::Error: Into<http::Error>,
+        V: TryInto<HeaderValue>,
+        V::Error: Into<http::Error>,
+    {
+        if let (Ok(name), Ok(value)) = (name.try_into(), value.try_into()) {
+            self.extra_headers
+                .get_or_insert_with(HeaderMap::new)
+                .insert(name, value);
+        }
+        self
+    }
+
     /// Returns an action meaning wreq should follow the next URI.
     #[inline]
     pub fn follow(self) -> Action {
         Action {
-            inner: redirect::Action::Follow,
+            inner: redirect::Action::Follow {
+                extra_headers: self.extra_headers,
+            },
         }
     }
 
@@ -299,6 +347,7 @@ impl Attempt<'_, true> {
             headers: Cow::Owned(self.headers.into_owned()),
             uri: Cow::Owned(self.uri.into_owned()),
             previous: Cow::Owned(self.previous.into_owned()),
+            extra_headers: self.extra_headers,
         };
         let pending = Box::pin(func(attempt).map(|action| action.inner));
         Action {
@@ -396,8 +445,9 @@ impl redirect::Policy<Body, BoxError> for FollowRedirectPolicy {
             .expect("[BUG] FollowRedirectPolicy should always have a policy set");
 
         // Check if the next URI is already in the list of URLs.
-        match policy.check(attempt.status, attempt.headers, next_uri, &self.uris) {
-            redirect::Action::Follow => {
+        let action = policy.check(attempt.status, attempt.headers, next_uri, &self.uris);
+        match action {
+            redirect::Action::Follow { .. } => {
                 // Validate the redirect URI scheme
                 if !(next_uri.is_http() || next_uri.is_https()) {
                     return Err(Error::uri_bad_scheme(next_uri.clone()).into());
@@ -422,7 +472,7 @@ impl redirect::Policy<Body, BoxError> for FollowRedirectPolicy {
                     });
                 }
 
-                Ok(redirect::Action::Follow)
+                Ok(action)
             }
             redirect::Action::Stop => Ok(redirect::Action::Stop),
             redirect::Action::Pending(task) => Ok(redirect::Action::Pending(task)),
@@ -502,7 +552,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         match policy.check(StatusCode::FOUND, &HeaderMap::new(), &next, &previous) {
-            redirect::Action::Follow => (),
+            redirect::Action::Follow { .. } => (),
             other => panic!("unexpected {other:?}"),
         }
 
@@ -538,7 +588,7 @@ mod tests {
 
         let next = Uri::try_from("http://bar/baz").unwrap();
         match policy.check(StatusCode::FOUND, &HeaderMap::new(), &next, &[]) {
-            redirect::Action::Follow => (),
+            redirect::Action::Follow { .. } => (),
             other => panic!("unexpected {other:?}"),
         }
 
@@ -571,5 +621,44 @@ mod tests {
 
         remove_sensitive_headers(&mut headers, &next, &prev);
         assert_eq!(headers, filtered_headers);
+    }
+
+    #[test]
+    fn test_redirect_policy_custom_with_headers() {
+        let policy = Policy::custom(|attempt| {
+            attempt
+                .header("x-custom", "value")
+                .header("sec-fetch-site", "cross-site")
+                .follow()
+        });
+
+        let next = Uri::try_from("http://bar/baz").unwrap();
+        match policy.check(StatusCode::FOUND, &HeaderMap::new(), &next, &[]) {
+            redirect::Action::Follow {
+                extra_headers: Some(headers),
+            } => {
+                assert_eq!(
+                    headers.get("x-custom").unwrap(),
+                    &HeaderValue::from_static("value")
+                );
+                assert_eq!(
+                    headers.get("sec-fetch-site").unwrap(),
+                    &HeaderValue::from_static("cross-site")
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_redirect_policy_follow_without_headers() {
+        // Ensure follow() without header() produces Action::Follow { extra_headers: None }
+        let policy = Policy::custom(|attempt| attempt.follow());
+
+        let next = Uri::try_from("http://bar/baz").unwrap();
+        match policy.check(StatusCode::FOUND, &HeaderMap::new(), &next, &[]) {
+            redirect::Action::Follow { .. } => (),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

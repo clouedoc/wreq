@@ -57,7 +57,10 @@ pub enum Action {
 impl fmt::Debug for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Action::Follow { .. } => f.debug_tuple("Follow").finish(),
+            Action::Follow { extra_headers } => f
+                .debug_struct("Follow")
+                .field("extra_headers", extra_headers)
+                .finish(),
             Action::Stop => f.debug_tuple("Stop").finish(),
             Action::Pending(_) => f.debug_tuple("Pending").finish(),
             Action::Error(_) => f.debug_tuple("Error").finish(),

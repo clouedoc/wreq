@@ -242,7 +242,7 @@ where
     ReqBody: Body + Default,
 {
     match redirect.action {
-        Action::Follow => {
+        Action::Follow { extra_headers } => {
             redirect.parts.uri = redirect.location;
             redirect
                 .body_repr
@@ -250,6 +250,16 @@ where
 
             let mut req = Request::from_parts(redirect.parts.clone(), redirect.body);
             redirect.policy.on_request(&mut req);
+
+            // Apply user-specified headers after on_request, so they take precedence
+            if let Some(headers) = extra_headers {
+                for (name, value) in headers {
+                    if let Some(name) = name {
+                        req.headers_mut().insert(name, value);
+                    }
+                }
+            }
+
             redirect
                 .future
                 .set(Either::Right(Oneshot::new(redirect.service.clone(), req)));
